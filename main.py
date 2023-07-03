@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime
 import ssl
 from fastapi import FastAPI, Request
 from binance.client import *
@@ -5,15 +7,14 @@ from binance.enums import *
 import MetaTrader5 as mt5
 
 app = FastAPI()
+logging.basicConfig(filename='app.log', level=logging.INFO,
+                    format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
 
 
 class Broker:
-    """
-    Blueprint for brokers
-    """
-    def __init__(self, symbol, quantity):
+    """ Blueprint for brokers """
+    def __init__(self, symbol):
         self.symbol = symbol
-        self.quantity = quantity
 
     def open_long(self):
         pass
@@ -29,90 +30,87 @@ class Broker:
 
 
 class MT5Broker(Broker):
-    """
-    MT5 broker handler
-
-    Args:
-        Broker (class): blueprint
-    """
-    def __init__(self, symbol, quantity):
-        super().__init__(symbol, quantity)
+    """ MT5 broker handler """
+    def __init__(self, symbol):
+        super().__init__(symbol)
 
     def open_long(self):
         self.close_position()
-        mt5.Buy(self.symbol, self.quantity)
-        print("Long position have just been opened: ", self.symbol)
+        lot_size = self.calculate_position_size()
+        mt5.Buy(self.symbol, lot_size)
+        logging.info("Long position have just been opened: " + self.symbol)
 
     def open_short(self):
         self.close_position()
-        mt5.Sell(self.symbol, self.quantity)
-        print("Short position have just been opened: ", self.symbol)
+        lot_size = self.calculate_position_size()
+        mt5.Sell(self.symbol, lot_size)
+        logging.info("Short position have just been opened: " + self.symbol)
 
     def close_position(self):
         mt5.Close(self.symbol)
-        print("Positions closed successfully")
+        logging.info("Positions closed successfully")
+
+    def calculate_position_size(self):
+        account_info = mt5.account_info()
+        equity = account_info.equity
+        lot_size = equity / 10000  # 0.01 lot size for each 100 usd of equity size
+        return lot_size
 
 
 class BinanceBroker(Broker):
-    """
-    Binance broker handler
-
-    Args:
-        Broker (class): blueprint
-    """
-    def __init__(self, symbol, quantity):
-        super().__init__(symbol, quantity)
+    """ Binance broker handler """
+    def __init__(self, symbol):
+        super().__init__(symbol)
         self.client = Client('api_key', 'api_secret')  # Initialize binance client
 
-    def create_order(self, side):
+    def create_order(self, side, quantity):
         order = self.client.futures_create_order(
             symbol=self.symbol,
             side=side,
             type=ORDER_TYPE_MARKET,
-            quantity=self.quantity,
+            quantity=quantity,
         )
         return order
 
     def open_long(self):
         self.close_position()
-        self.create_order(SIDE_BUY)
-        print("Long have been just opened on: ", self.symbol)
+        quantity = self.calculate_position_size()
+        self.create_order(SIDE_BUY, quantity)
+        logging.info("Long have been just opened on: " + self.symbol)
 
     def open_short(self):
         self.close_position()
-        self.create_order(SIDE_SELL)
-        print("Short have been just opened on: ", self.symbol)
+        quantity = self.calculate_position_size()
+        self.create_order(SIDE_SELL, quantity)
+        logging.info("Short have been just opened on: " + self.symbol)
 
     def close_position(self):
-        positions = self.client.futures_position_information()
+        positions = self.client.futures_account_balance()
         for position in positions:
-            if position['symbol'] == self.symbol:
-                quantity = float(position['positionAmt'])
-                if quantity > 0:
-                    self.create_order(SIDE_SELL)
-                    print("Closed long on: ", self.symbol)
-                if quantity < 0:
-                    quantity = -quantity
-                    self.create_order(SIDE_BUY)
-                    print("Closed short on: ", self.symbol)
-                if quantity == 0:
-                    print("No positions on: ", self.symbol)
+            if position['asset'] == 'USDT':  # assuming account is in USDT
+                balance = float(position['balance'])
+                if balance > 0:
+                    self.create_order(SIDE_SELL, balance)
+                    logging.info("Closed long on: " + self.symbol)
+
+    def calculate_position_size(self):
+        account_info = self.client.futures_account_balance()
+        for info in account_info:
+            if info['asset'] == 'USDT':  # assuming account is in USDT
+                balance = float(info['balance'])
+        quantity = balance * 0.1  # 10% of account balance
+        return quantity
 
 
 class BrokerFactory:
-    """
-    Factory for getting the broker
-
-    Returns:
-        object: broker
-    """
+    """ Factory for getting the broker """
     @staticmethod
-    def get_broker(broker_type, symbol, quantity):
+    def get_broker(broker_type, symbol):
         brokers = {
             "M": MT5Broker,
             "B": BinanceBroker
         }
-        return brokers[broker_type](symbol, quantity)
+        return brokers[broker_type](symbol)
 
 
 @app.post("/webhook529376sdgf")
@@ -123,28 +121,27 @@ async def process_webhook(request: Request):
 
     symbol = str(payload_list[0])
     direction = payload_list[1]
-    lot = float(payload_list[2])
-    broker_type = payload_list[3]
+    broker_type = payload_list[2]
 
-    broker = BrokerFactory.get_broker(broker_type, symbol, lot)
+    broker = BrokerFactory.get_broker(broker_type, symbol)
+
+    logging.info("Received webhook: symbol - " + symbol + ", direction - " + direction + ", broker - " + broker_type)
 
     if direction == 'buy':
         broker.open_long()
     elif direction == 'sell':
         broker.open_short()
 
-
 if __name__ == "__main__":
     # pass your mt5 creditentials below
     if mt5.initialize() and mt5.login(1234567, 'password', server='VantageInternational-Live'):
         # print account info
         account_info = mt5.account_info()
-        print("Account Info: ", account_info)
+        logging.info("Account Info: " + str(account_info))
     else:
-        print("MT5 Login failed")
+        logging.error("MT5 Login failed")
 
     import uvicorn
-
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(certfile="certificate.crt", keyfile="private.key")
-    uvicorn.run(app, host="IP", port=443, ssl_certfile="certificate.crt", ssl_keyfile="private.key")
+    uvicorn.run(app, host="195.238.122.243", port=443, ssl_certfile="certificate.crt", ssl_keyfile="private.key")
