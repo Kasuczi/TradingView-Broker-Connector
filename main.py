@@ -1,6 +1,5 @@
-import logging
-from datetime import datetime
 import ssl
+import logging
 from fastapi import FastAPI, Request
 from binance.client import *
 from binance.enums import *
@@ -8,11 +7,13 @@ import MetaTrader5 as mt5
 
 app = FastAPI()
 logging.basicConfig(filename='app.log', level=logging.INFO,
-                    format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
+                    format='%(asctime)s %(levelname)s:%(message)s')
 
 
 class Broker:
-    """ Blueprint for brokers """
+    """
+    Blueprint for brokers
+    """
     def __init__(self, symbol):
         self.symbol = symbol
 
@@ -30,35 +31,45 @@ class Broker:
 
 
 class MT5Broker(Broker):
-    """ MT5 broker handler """
+    """
+    MT5 broker handler
+
+    Args:
+        Broker (class): blueprint
+    """
     def __init__(self, symbol):
         super().__init__(symbol)
 
     def open_long(self):
+        quantity = self.calculate_position_size()
         self.close_position()
-        lot_size = self.calculate_position_size()
-        mt5.Buy(self.symbol, lot_size)
-        logging.info("Long position have just been opened: " + self.symbol)
+        mt5.Buy(self.symbol, quantity)
+        logging.info(f"Long position have just been opened: {self.symbol}")
 
     def open_short(self):
+        quantity = self.calculate_position_size()
         self.close_position()
-        lot_size = self.calculate_position_size()
-        mt5.Sell(self.symbol, lot_size)
-        logging.info("Short position have just been opened: " + self.symbol)
+        mt5.Sell(self.symbol, quantity)
+        logging.info(f"Short position have just been opened: {self.symbol}")
 
     def close_position(self):
         mt5.Close(self.symbol)
-        logging.info("Positions closed successfully")
+        logging.info(f"Positions closed successfully for symbol: {self.symbol}")
 
     def calculate_position_size(self):
         account_info = mt5.account_info()
         equity = account_info.equity
-        lot_size = equity / 10000  # 0.01 lot size for each 100 usd of equity size
-        return lot_size
+        position_size = 0.01 * (equity / 100)
+        return position_size
 
 
 class BinanceBroker(Broker):
-    """ Binance broker handler """
+    """
+    Binance broker handler
+
+    Args:
+        Broker (class): blueprint
+    """
     def __init__(self, symbol):
         super().__init__(symbol)
         self.client = Client('api_key', 'api_secret')  # Initialize binance client
@@ -76,34 +87,43 @@ class BinanceBroker(Broker):
         self.close_position()
         quantity = self.calculate_position_size()
         self.create_order(SIDE_BUY, quantity)
-        logging.info("Long have been just opened on: " + self.symbol)
+        logging.info(f"Long have been just opened on: {self.symbol}")
 
     def open_short(self):
         self.close_position()
         quantity = self.calculate_position_size()
         self.create_order(SIDE_SELL, quantity)
-        logging.info("Short have been just opened on: " + self.symbol)
+        logging.info(f"Short have been just opened on: {self.symbol}")
 
     def close_position(self):
-        positions = self.client.futures_account_balance()
+        positions = self.client.futures_position_information()
         for position in positions:
-            if position['asset'] == 'USDT':  # assuming account is in USDT
-                balance = float(position['balance'])
-                if balance > 0:
-                    self.create_order(SIDE_SELL, balance)
-                    logging.info("Closed long on: " + self.symbol)
+            if position['symbol'] == self.symbol:
+                quantity = float(position['positionAmt'])
+                if quantity > 0:
+                    self.create_order(SIDE_SELL, quantity)
+                    logging.info(f"Closed long on: {self.symbol}")
+                elif quantity < 0:
+                    quantity = abs(quantity)
+                    self.create_order(SIDE_BUY, quantity)
+                    logging.info(f"Closed short on: {self.symbol}")
+                elif quantity == 0:
+                    logging.info(f"No positions on: {self.symbol}")
 
     def calculate_position_size(self):
-        account_info = self.client.futures_account_balance()
-        for info in account_info:
-            if info['asset'] == 'USDT':  # assuming account is in USDT
-                balance = float(info['balance'])
-        quantity = balance * 0.1  # 10% of account balance
-        return quantity
+        futures_account = self.client.futures_account()
+        account_balance = futures_account['totalWalletBalance']
+        position_size = 0.10 * float(account_balance)  # 10% of account size
+        return position_size
 
 
 class BrokerFactory:
-    """ Factory for getting the broker """
+    """
+    Factory for getting the broker
+
+    Returns:
+        object: broker
+    """
     @staticmethod
     def get_broker(broker_type, symbol):
         brokers = {
@@ -121,27 +141,29 @@ async def process_webhook(request: Request):
 
     symbol = str(payload_list[0])
     direction = payload_list[1]
-    broker_type = payload_list[2]
+    broker_type = payload_list[3]
 
     broker = BrokerFactory.get_broker(broker_type, symbol)
-
-    logging.info("Received webhook: symbol - " + symbol + ", direction - " + direction + ", broker - " + broker_type)
 
     if direction == 'buy':
         broker.open_long()
     elif direction == 'sell':
         broker.open_short()
 
+    logging.info(f"Received webhook with payload: {payload_list}")
+
+
 if __name__ == "__main__":
     # pass your mt5 creditentials below
     if mt5.initialize() and mt5.login(1234567, 'password', server='VantageInternational-Live'):
         # print account info
         account_info = mt5.account_info()
-        logging.info("Account Info: " + str(account_info))
+        logging.info(f"Account Info: {account_info}")
     else:
-        logging.error("MT5 Login failed")
+        logging.info("MT5 Login failed")
 
     import uvicorn
+
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(certfile="certificate.crt", keyfile="private.key")
     uvicorn.run(app, host="195.238.122.243", port=443, ssl_certfile="certificate.crt", ssl_keyfile="private.key")
