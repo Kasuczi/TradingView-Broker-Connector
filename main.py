@@ -16,6 +16,7 @@ class Broker:
     """
     def __init__(self, symbol):
         self.symbol = symbol
+        self.current_position = None
 
     def open_long(self):
         pass
@@ -39,21 +40,30 @@ class MT5Broker(Broker):
     """
     def __init__(self, symbol):
         super().__init__(symbol)
+        self.positions = []
 
     def open_long(self):
         quantity = self.calculate_position_size()
-        self.close_position()
+        if self.current_position != 'long':  # only close positions if current position isn't long
+            self.close_position()
         mt5.Buy(self.symbol, quantity)
+        self.positions.append(quantity)  # add to positions
+        self.current_position = 'long'  # update current position
         logging.info(f"Long position have just been opened: {self.symbol}")
 
     def open_short(self):
         quantity = self.calculate_position_size()
-        self.close_position()
+        if self.current_position != 'short':  # only close positions if current position isn't short
+            self.close_position()
         mt5.Sell(self.symbol, quantity)
+        self.positions.append(quantity)  # add to positions
+        self.current_position = 'short'  # update current position
         logging.info(f"Short position have just been opened: {self.symbol}")
 
     def close_position(self):
         mt5.Close(self.symbol)
+        self.positions = []  # reset positions
+        self.current_position = None  # update current position
         logging.info(f"Positions closed successfully for symbol: {self.symbol}")
 
     def calculate_position_size(self):
@@ -73,6 +83,7 @@ class BinanceBroker(Broker):
     def __init__(self, symbol):
         super().__init__(symbol)
         self.client = Client('api_key', 'api_secret')  # Initialize binance client
+        self.positions = []
 
     def create_order(self, side, quantity):
         order = self.client.futures_create_order(
@@ -84,15 +95,21 @@ class BinanceBroker(Broker):
         return order
 
     def open_long(self):
-        self.close_position()
         quantity = self.calculate_position_size()
+        if self.current_position != 'long':
+            self.close_position()
         self.create_order(SIDE_BUY, quantity)
+        self.positions.append(quantity)
+        self.current_position = 'long'
         logging.info(f"Long have been just opened on: {self.symbol}")
 
     def open_short(self):
-        self.close_position()
         quantity = self.calculate_position_size()
+        if self.current_position != 'short':
+            self.close_position()
         self.create_order(SIDE_SELL, quantity)
+        self.positions.append(quantity)
+        self.current_position = 'short'
         logging.info(f"Short have been just opened on: {self.symbol}")
 
     def close_position(self):
